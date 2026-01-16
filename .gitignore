@@ -12,3 +12,8 @@ node_modules/
 
 # build output
 dist/
+
+# environment variables (重要：避免提交敏感信息)
+.env
+.env.local
+.env.*.local
