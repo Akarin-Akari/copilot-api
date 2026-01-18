@@ -198,8 +198,10 @@ function fixToolCallsMessages(messages: Array<Message>): Array<Message> {
  * Handles:
  * 1. Claude Code subagent requests with version suffixes (e.g., claude-sonnet-4-20250514 -> claude-sonnet-4)
  * 2. Codex CLI models with -codex suffix (e.g., gpt-5.2-codex -> gpt-5.2)
+ * 3. Codex completion models that don't support /chat/completions (e.g., gpt-5.1-codex-max -> gpt-5.1)
  *
  * The -codex suffix is added by Codex CLI to identify requests but is not recognized by Copilot API.
+ * Some codex models (like gpt-5.1-codex-max) are completion-only models and need to be mapped to chat models.
  */
 function translateModelName(model: string): string {
   const modelLower = model.toLowerCase()
@@ -215,7 +217,14 @@ function translateModelName(model: string): string {
     return "claude-haiku-4"
   }
 
-  // GPT models with -codex suffix: strip the suffix
+  // GPT-5.1 codex models: these are completion-only models, map to gpt-5.1
+  // Error: "model gpt-5.1-codex-max is not accessible via the /chat/completions endpoint"
+  if (modelLower.includes("gpt") && modelLower.includes("5.1") && modelLower.includes("codex")) {
+    consola.debug(`[ModelTranslation] Mapping codex completion model to chat model: "${model}" -> "gpt-5.1"`)
+    return "gpt-5.1"
+  }
+
+  // GPT-5.2 with -codex suffix: strip the suffix
   // Codex CLI adds -codex suffix but Copilot API doesn't recognize it
   if (modelLower.includes("gpt") && modelLower.endsWith("-codex")) {
     // Remove -codex suffix
@@ -223,10 +232,6 @@ function translateModelName(model: string): string {
     consola.debug(`[ModelTranslation] Stripping -codex suffix: "${model}" -> "${baseModel}"`)
     return baseModel
   }
-
-  // Handle other -codex variants (e.g., gpt-5.1-codex-mini, gpt-5.1-codex-max)
-  // These might be valid Copilot models, so we pass them through
-  // But if they fail, we can add specific mappings here
 
   // All other models are passed through as-is
   return model

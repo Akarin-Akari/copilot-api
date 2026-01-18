@@ -60,8 +60,9 @@ export async function runServer(options: RunServerOptions): Promise<void> {
   await setupCopilotToken()
   await cacheModels()
 
+  // Log available models with their capabilities type
   consola.info(
-    `Available models: \n${state.models?.data.map((model) => `- ${model.id}`).join("\n")}`,
+    `Available models: \n${state.models?.data.map((model) => `- ${model.id} (type: ${model.capabilities?.type || 'unknown'})`).join("\n")}`,
   )
 
   const serverUrl = `http://localhost:${options.port}`
