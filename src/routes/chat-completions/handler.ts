@@ -4,6 +4,7 @@ import consola from "consola"
 import { streamSSE, type SSEMessage } from "hono/streaming"
 
 import { awaitApproval } from "~/lib/approval"
+import { truncateMessagesSmart, needsTruncation } from "~/lib/context-truncation"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { state } from "~/lib/state"
 import { getTokenCount } from "~/lib/tokenizer"
@@ -14,6 +15,67 @@ import {
   type ChatCompletionsPayload,
   type Message,
 } from "~/services/copilot/create-chat-completions"
+
+/**
+ * Sanitizes tool_call.id to match the pattern ^[a-zA-Z0-9_-]+
+ * Required by Copilot API for Codex/GPT models
+ * @param id - The original tool_call.id
+ * @returns A sanitized ID that matches the required pattern
+ */
+function sanitizeToolId(id: string): string {
+  if (!id) {
+    // Generate a fallback ID if empty
+    const fallbackId = `tool_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`
+    consola.warn(
+      `[sanitizeToolId] Empty tool ID, generated fallback: ${fallbackId}`,
+    )
+    return fallbackId
+  }
+  // Remove any characters that don't match [a-zA-Z0-9_-]
+  const sanitized = id.replaceAll(/[^\w-]/g, "")
+  if (!sanitized) {
+    // If all characters were removed, generate a fallback
+    const fallbackId = `tool_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`
+    consola.warn(
+      `[sanitizeToolId] All characters removed from "${id}", generated fallback: ${fallbackId}`,
+    )
+    return fallbackId
+  }
+  if (sanitized !== id) {
+    consola.debug(
+      `[sanitizeToolId] Sanitized tool ID: "${id}" -> "${sanitized}"`,
+    )
+  }
+  return sanitized
+}
+
+/**
+ * Sanitizes all tool_call IDs in messages to match the required pattern
+ */
+function sanitizeToolIdsInMessages(messages: Array<Message>): Array<Message> {
+  return messages.map((msg) => {
+    const sanitizedMsg = { ...msg }
+
+    // Sanitize tool_call_id in tool messages
+    if (msg.role === "tool" && msg.tool_call_id) {
+      sanitizedMsg.tool_call_id = sanitizeToolId(msg.tool_call_id)
+    }
+
+    // Sanitize tool_calls[].id in assistant messages
+    if (
+      msg.role === "assistant"
+      && msg.tool_calls
+      && msg.tool_calls.length > 0
+    ) {
+      sanitizedMsg.tool_calls = msg.tool_calls.map((tc) => ({
+        ...tc,
+        id: sanitizeToolId(tc.id),
+      }))
+    }
+
+    return sanitizedMsg
+  })
+}
 
 /**
  * Validates and fixes tool_calls message format issues.
@@ -30,7 +92,11 @@ function fixToolCallsMessages(messages: Array<Message>): Array<Message> {
   let toolResponseCount = 0
 
   for (const msg of messages) {
-    if (msg.role === "assistant" && msg.tool_calls && msg.tool_calls.length > 0) {
+    if (
+      msg.role === "assistant"
+      && msg.tool_calls
+      && msg.tool_calls.length > 0
+    ) {
       assistantWithToolCallsCount++
     }
     if (msg.role === "tool" && msg.tool_call_id) {
@@ -52,9 +118,12 @@ function fixToolCallsMessages(messages: Array<Message>): Array<Message> {
 
   // Build a map of tool_call_id -> assistant message index (for validation)
   const toolCallIdToAssistantIndex = new Map<string, number>()
-  for (let i = 0; i < messages.length; i++) {
-    const msg = messages[i]
-    if (msg.role === "assistant" && msg.tool_calls && msg.tool_calls.length > 0) {
+  for (const [i, msg] of messages.entries()) {
+    if (
+      msg.role === "assistant"
+      && msg.tool_calls
+      && msg.tool_calls.length > 0
+    ) {
       for (const tc of msg.tool_calls) {
         toolCallIdToAssistantIndex.set(tc.id, i)
       }
@@ -75,7 +144,11 @@ function fixToolCallsMessages(messages: Array<Message>): Array<Message> {
     fixedMessages.push(msg)
 
     // If this is an assistant message with tool_calls, insert tool responses immediately after
-    if (msg.role === "assistant" && msg.tool_calls && msg.tool_calls.length > 0) {
+    if (
+      msg.role === "assistant"
+      && msg.tool_calls
+      && msg.tool_calls.length > 0
+    ) {
       for (const tc of msg.tool_calls) {
         const toolResponse = toolResponseMap.get(tc.id)
         if (toolResponse) {
@@ -119,16 +192,62 @@ function fixToolCallsMessages(messages: Array<Message>): Array<Message> {
   return fixedMessages
 }
 
+/**
+ * Translates model names to Copilot-compatible versions.
+ * Claude Code subagent requests use specific model versions (e.g., claude-sonnet-4-20250514)
+ * which Copilot doesn't support, so we normalize them to base names.
+ */
+function translateModelName(model: string): string {
+  // Claude models: strip version suffix (e.g., claude-sonnet-4-20250514 -> claude-sonnet-4)
+  if (model.startsWith("claude-sonnet-4-")) {
+    return "claude-sonnet-4"
+  }
+  if (model.startsWith("claude-opus-4-")) {
+    return "claude-opus-4"
+  }
+  if (model.startsWith("claude-haiku-4-")) {
+    return "claude-haiku-4"
+  }
+  // All other models are passed through as-is
+  return model
+}
+
 export async function handleCompletion(c: Context) {
   await checkRateLimit(state)
 
   let payload = await c.req.json<ChatCompletionsPayload>()
   consola.debug("Request payload:", JSON.stringify(payload).slice(-400))
 
-  // Fix tool_calls message format issues before forwarding (for codex compatibility)
+  // Translate model name to Copilot-compatible version
+  const originalModel = payload.model
+  const translatedModel = translateModelName(payload.model)
+  if (translatedModel !== originalModel) {
+    consola.info(
+      `[ModelTranslation] "${originalModel}" -> "${translatedModel}"`,
+    )
+  }
+
+  // Sanitize tool_call IDs to match required pattern ^[a-zA-Z0-9_-]+
+  // Then fix tool_calls message format issues before forwarding (for codex compatibility)
+  let processedMessages = fixToolCallsMessages(sanitizeToolIdsInMessages(payload.messages))
+
+  // Apply context truncation if needed to avoid token limit errors
+  if (needsTruncation(processedMessages, translatedModel)) {
+    const truncationResult = truncateMessagesSmart(
+      processedMessages,
+      translatedModel,
+    )
+    processedMessages = truncationResult.messages
+    consola.info(
+      `[ContextTruncation] Applied: ${truncationResult.originalTokens} -> ${truncationResult.truncatedTokens} tokens ` +
+      `(removed ${truncationResult.removedCount} msgs, compressed ${truncationResult.compressedCount} tool results)`,
+    )
+  }
+
   payload = {
     ...payload,
-    messages: fixToolCallsMessages(payload.messages),
+    model: translatedModel,
+    messages: processedMessages,
   }
 
   // Find the selected model

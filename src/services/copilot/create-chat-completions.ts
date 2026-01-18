@@ -28,6 +28,9 @@ export const createChatCompletions = async (
     "X-Initiator": isAgentCall ? "agent" : "user",
   }
 
+  // Debug: Log the model being sent to Copilot API
+  consola.info(`[CopilotAPI] Sending request with model: "${payload.model}"`)
+
   const response = await fetch(`${copilotBaseUrl(state)}/chat/completions`, {
     method: "POST",
     headers,

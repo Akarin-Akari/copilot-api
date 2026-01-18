@@ -1,3 +1,5 @@
+import consola from "consola"
+
 import {
   type ChatCompletionResponse,
   type ChatCompletionsPayload,
@@ -23,6 +25,39 @@ import {
   type AnthropicUserMessage,
 } from "./anthropic-types"
 import { mapOpenAIStopReasonToAnthropic } from "./utils"
+
+/**
+ * Sanitizes tool_use.id to match the pattern ^[a-zA-Z0-9_-]+
+ * Required by Copilot API for Codex/GPT models
+ * @param id - The original tool_use.id from Anthropic format
+ * @returns A sanitized ID that matches the required pattern
+ */
+function sanitizeToolId(id: string): string {
+  if (!id) {
+    // Generate a fallback ID if empty
+    const fallbackId = `tool_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`
+    consola.warn(
+      `[sanitizeToolId] Empty tool ID, generated fallback: ${fallbackId}`,
+    )
+    return fallbackId
+  }
+  // Remove any characters that don't match [a-zA-Z0-9_-]
+  const sanitized = id.replaceAll(/[^\w-]/g, "")
+  if (!sanitized) {
+    // If all characters were removed, generate a fallback
+    const fallbackId = `tool_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`
+    consola.warn(
+      `[sanitizeToolId] All characters removed from "${id}", generated fallback: ${fallbackId}`,
+    )
+    return fallbackId
+  }
+  if (sanitized !== id) {
+    consola.debug(
+      `[sanitizeToolId] Sanitized tool ID: "${id}" -> "${sanitized}"`,
+    )
+  }
+  return sanitized
+}
 
 // Payload translation
 
@@ -102,7 +137,7 @@ function handleUserMessage(message: AnthropicUserMessage): Array<Message> {
     for (const block of toolResultBlocks) {
       newMessages.push({
         role: "tool",
-        tool_call_id: block.tool_use_id,
+        tool_call_id: sanitizeToolId(block.tool_use_id),
         content: mapContent(block.content),
       })
     }
@@ -159,7 +194,7 @@ function handleAssistantMessage(
           role: "assistant",
           content: allTextContent || null,
           tool_calls: toolUseBlocks.map((toolUse) => ({
-            id: toolUse.id,
+            id: sanitizeToolId(toolUse.id),
             type: "function",
             function: {
               name: toolUse.name,
