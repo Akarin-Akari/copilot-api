@@ -194,10 +194,16 @@ function fixToolCallsMessages(messages: Array<Message>): Array<Message> {
 
 /**
  * Translates model names to Copilot-compatible versions.
- * Claude Code subagent requests use specific model versions (e.g., claude-sonnet-4-20250514)
- * which Copilot doesn't support, so we normalize them to base names.
+ *
+ * Handles:
+ * 1. Claude Code subagent requests with version suffixes (e.g., claude-sonnet-4-20250514 -> claude-sonnet-4)
+ * 2. Codex CLI models with -codex suffix (e.g., gpt-5.2-codex -> gpt-5.2)
+ *
+ * The -codex suffix is added by Codex CLI to identify requests but is not recognized by Copilot API.
  */
 function translateModelName(model: string): string {
+  const modelLower = model.toLowerCase()
+
   // Claude models: strip version suffix (e.g., claude-sonnet-4-20250514 -> claude-sonnet-4)
   if (model.startsWith("claude-sonnet-4-")) {
     return "claude-sonnet-4"
@@ -208,6 +214,20 @@ function translateModelName(model: string): string {
   if (model.startsWith("claude-haiku-4-")) {
     return "claude-haiku-4"
   }
+
+  // GPT models with -codex suffix: strip the suffix
+  // Codex CLI adds -codex suffix but Copilot API doesn't recognize it
+  if (modelLower.includes("gpt") && modelLower.endsWith("-codex")) {
+    // Remove -codex suffix
+    const baseModel = model.slice(0, -6) // Remove "-codex"
+    consola.debug(`[ModelTranslation] Stripping -codex suffix: "${model}" -> "${baseModel}"`)
+    return baseModel
+  }
+
+  // Handle other -codex variants (e.g., gpt-5.1-codex-mini, gpt-5.1-codex-max)
+  // These might be valid Copilot models, so we pass them through
+  // But if they fail, we can add specific mappings here
+
   // All other models are passed through as-is
   return model
 }
